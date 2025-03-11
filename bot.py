@@ -1,27 +1,38 @@
 import logging
+import logging
 import aiofiles
 import os
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.client.default import DefaultBotProperties
 from logging.handlers import RotatingFileHandler
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from config import BOT_TOKEN, ADMIN_IDS, DB_NAME
-from database import (
-    add_user, get_user_count, get_all_users, add_file, get_file, 
-    add_channel, remove_channel, get_channels, is_file_code_exists, 
-    remove_file, add_file_request, get_user_requests, get_all_file_codes
-)
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters import Command
+from database import add_user, get_user_count, get_all_users, add_file, get_file, add_channel, remove_channel, get_channels, is_file_code_exists, remove_file, add_file_request, get_user_requests, get_all_file_codes
 import pandas as pd
+from aiogram.dispatcher.filters.state import State, StatesGroup
 from datetime import datetime, timedelta
-import sqlite3
+from database import DB_NAME
 import sys
+import sqlite3
 
-# Logging sozlamalari
+import logging
+
+# Botni ishga tushirish
+
+try:
+    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")  # HTML formatlashni standart qilish
+except Exception as e:
+    exit(1)
+
+dp = Dispatcher(bot, storage=MemoryStorage())
+
+# Adminlarni tekshirish uchun
+ADMINS = ADMIN_IDS
+
 log_file = "bot.log"
 max_log_size = 5 * 1024 * 1024  # 5 MB
 backup_count = 1
@@ -35,54 +46,49 @@ logging.basicConfig(
     ]
 )
 
-logger = logging.getLogger(__name__)
-
-# UTF-8 kodlashni majburiy qilish
+# UTF-8 kodlashini majburiy qilish
 if sys.stdout.encoding != 'utf-8':
     sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 
-# Bot va Dispatcher ni ishga tushirish
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="HTML")
-)
-storage = MemoryStorage()
-dp = Dispatcher(bot=bot, storage=storage)
-
-ADMINS = ADMIN_IDS
+logger = logging.getLogger(__name__)
 
 # Tugmalar
-admin_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="📥 Excelni yuklash")],
-        [KeyboardButton(text="📤 Fayl yuklash"), KeyboardButton(text="🗑 Fayl o‘chirish")],
-        [KeyboardButton(text="📢 Reklama"), KeyboardButton(text="🔗 Majburiy obuna")],
-        [KeyboardButton(text="👤 Foydalanuvchi statistikasi"), KeyboardButton(text="📈 Umumiy statistika")],
-        [KeyboardButton(text="📋 Fayl kodlari ro‘yxati")]
-    ],
-    resize_keyboard=True
+admin_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+admin_keyboard.add(
+    KeyboardButton("📊 Statistika"),
+    KeyboardButton("📥 Excelni yuklash"),
+    KeyboardButton("📤 Fayl yuklash"),
+    KeyboardButton("🗑 Fayl o‘chirish"),
+    KeyboardButton("📢 Reklama"),
+    KeyboardButton("🔗 Majburiy obuna"),
+    KeyboardButton("👤 Foydalanuvchi statistikasi"),
+    KeyboardButton("📈 Umumiy statistika"),
+    KeyboardButton("📋 Fayl kodlari ro‘yxati")
 )
 
-reklama_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📝 SMS"), KeyboardButton(text="🖼 Rasm")],
-        [KeyboardButton(text="🎥 Video"), KeyboardButton(text="📁 Fayl")],
-        [KeyboardButton(text="🎞 GIF"), KeyboardButton(text="🎙 Ovozli xabar")],
-        [KeyboardButton(text="📍 Lokatsiya"), KeyboardButton(text="🎵 Musiqa")],
-        [KeyboardButton(text="🔙 Orqaga")]
-    ],
-    resize_keyboard=True
+reklama_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+reklama_keyboard.add(
+    KeyboardButton("📝 SMS"),
+    KeyboardButton("🖼 Rasm"),
+    KeyboardButton("🎥 Video"),
+    KeyboardButton("📁 Fayl"),
+    KeyboardButton("🎞 GIF"),
+    KeyboardButton("🎙 Ovozli xabar"),
+    KeyboardButton("📍 Lokatsiya"),
+    KeyboardButton("🎵 Musiqa"),
+    KeyboardButton("🔙 Orqaga")
 )
 
-majburiy_obuna_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Kanal qo'shish"), KeyboardButton(text="➖ Kanalni olib tashlash")],
-        [KeyboardButton(text="📋 Kanallar ro'yxati"), KeyboardButton(text="🔙 Orqaga")]
-    ],
-    resize_keyboard=True
+majburiy_obuna_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+majburiy_obuna_keyboard.add(
+    KeyboardButton("➕ Kanal qo'shish"),
+    KeyboardButton("➖ Kanalni olib tashlash"),
+    KeyboardButton("📋 Kanallar ro'yxati"),
+    KeyboardButton("🔙 Orqaga")
 )
 
 # State guruhlari
+
 class FileUploadStates(StatesGroup):
     waiting_for_code = State()
     waiting_for_file = State()
@@ -112,7 +118,7 @@ class MajburiyObunaStates(StatesGroup):
     waiting_for_channel_username = State()
     waiting_for_channel_remove = State()
 
-# Obunani tekshirish
+# Obunani tekshirish funksiyasi
 async def check_subscription(user_id):
     if user_id in ADMINS:
         return True
@@ -127,7 +133,7 @@ async def check_subscription(user_id):
             return False
     return True
 
-# Obuna talab qilish
+# Obuna talab qilish funksiyasi
 async def prompt_subscription(message):
     channels = get_channels()
     keyboard = InlineKeyboardMarkup(row_width=1)
@@ -135,12 +141,15 @@ async def prompt_subscription(message):
         keyboard.add(InlineKeyboardButton(text=f"📢 @{channel} ga obuna bo‘ling", url=f"https://t.me/{channel}"))
     keyboard.add(InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_subscription"))
     await message.answer(
-        "<b>⚠️ Diqqat!</b>\n<i>Botdan foydalanish uchun quyidagi kanallarga obuna bo‘lishingiz kerak:</i>\n👇 Obuna bo‘lib, “Tekshirish” tugmasini bosing!",
+        "<b>⚠️ Diqqat!</b>\n"
+        "<i>Botdan foydalanish uchun quyidagi kanallarga obuna bo‘lishingiz kerak:</i>\n"
+        "👇 Obuna bo‘lib, “Tekshirish” tugmasini bosing!",
+        parse_mode="HTML",
         reply_markup=keyboard
     )
 
 # Bekor qilish
-@dp.message(Command(commands=["cancel"]), state='*')
+@dp.message_handler(Command("cancel"), state="*")
 async def cancel_handler(message: types.Message, state: FSMContext):
     if message.from_user.id in ADMINS:
         await state.finish()
@@ -148,8 +157,8 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     else:
         await message.answer("Siz admin emassiz.")
 
-# Start buyrug‘i
-@dp.message(Command(commands=['start']))
+
+@dp.message_handler(commands=['start'])
 async def start_handler(message: types.Message):
     user = message.from_user
     logger.info(f"Foydalanuvchi {user.id} start bosdi.")
@@ -161,16 +170,28 @@ async def start_handler(message: types.Message):
 
     if user.id in ADMINS:
         await message.answer(
-            f"<b>👨‍💻 Admin Panelga Xush Kelibsiz, {user.first_name}!</b>\n<i>Assalomu alaykum, hurmatli admin!</i>\n🔧 Botni boshqarish uchun quyidagi imkoniyatlardan foydalaning:\n📊 <u>Statistika</u> | 📤 <u>Fayl yuklash</u> | 📢 <u>Reklama</u>\n👇 Tugmalarni sinab ko‘ring!",
+            f"<b>👨‍💻 Admin Panelga Xush Kelibsiz, {user.first_name}!</b>\n"
+            "<i>Assalomu alaykum, hurmatli admin!</i>\n"
+            "🔧 Botni boshqarish uchun quyidagi imkoniyatlardan foydalaning:\n"
+            "📊 <u>Statistika</u> | 📤 <u>Fayl yuklash</u> | 📢 <u>Reklama</u>\n"
+            "👇 Tugmalarni sinab ko‘ring!",
+            parse_mode="HTML",
             reply_markup=admin_keyboard
         )
     else:
         await message.answer(
-            "<b>🎉 Botga Xush Kelibsiz!</b>\n🌟 <i>Fayllarni tez va oson yuklab oling!</i>\n🇺🇿 <b>Salom!</b> Fayl olish uchun kodni kiriting\n🇷🇺 <b>Привет!</b> Введите код файла\n👉 Misol: <code>12345</code>\nℹ️ Yordam uchun: /help"
+            "<b>🎉 Botga Xush Kelibsiz!</b>\n"
+            "🌟 <i>Fayllarni tez va oson yuklab oling!</i>\n"
+            "🇺🇿 <b>Salom!</b> Fayl olish uchun kodni kiriting\n"
+            "🇷🇺 <b>Привет!</b> Введите код файла\n"
+            "👉 Misol: <code>12345</code>\n"
+            "ℹ️ Yordam uchun: /help",
+            parse_mode="HTML"
         )
+# Help komandasi
 
-# Help buyrug‘i
-@dp.message(Command(commands=['help']))
+
+@dp.message_handler(commands=['help'])
 async def help_handler(message: types.Message):
     if not await check_subscription(message.from_user.id):
         await prompt_subscription(message)
@@ -178,7 +199,7 @@ async def help_handler(message: types.Message):
     await message.answer("ℹ️ Botdan foydalanish:\n1. Fayl olish uchun raqamli kodni kiriting.\n2. Fayl Kodlarni, faqat https://t.me/chorniy_staylle da topish mumkin   \n3. Agar savolingiz bo‘lsa, Dasturchi bilan bog‘laning.\n3. Bot dasturchisi @Ifrs_7")
 
 # Obuna tekshiruvi callback
-@dp.callback_query(lambda c: c.data == "check_subscription")
+@dp.callback_query_handler(text="check_subscription")
 async def check_subscription_callback(callback: types.CallbackQuery):
     messages = {
         "uz": "❌ Hali barcha kanallarga obuna bo‘lmagansiz.",
@@ -188,7 +209,7 @@ async def check_subscription_callback(callback: types.CallbackQuery):
         await callback.message.delete()
         await callback.message.answer("✅ Obuna tekshirildi! Fayl kodini kiriting:")
     else:
-        user_lang = callback.from_user.language_code or "uz"
+        user_lang = callback.from_user.language_code
         warning_message = messages.get(user_lang, messages["uz"])
         await callback.answer(warning_message, show_alert=True)
 
@@ -208,7 +229,9 @@ async def send_file_by_type(chat_id, file_id, file_type, caption):
     else:
         await bot.send_message(chat_id, "❌ Noto‘g‘ri fayl turi!")
 
-@dp.message(lambda message: message.text.isdigit())
+
+
+@dp.message_handler(lambda message: message.text.isdigit(), state=None)
 async def get_file_by_code(message: types.Message):
     user_id = message.from_user.id
     if not await check_subscription(user_id):
@@ -218,6 +241,7 @@ async def get_file_by_code(message: types.Message):
     file_code = message.text.strip()
     file_data = get_file(file_code)
     
+    # So‘rovni log qilish
     if file_data:
         add_file_request(user_id, file_code)
     
@@ -232,7 +256,8 @@ async def get_file_by_code(message: types.Message):
     else:
         await message.answer("❌ Bunday kod bilan fayl topilmadi.")
 
-@dp.message(lambda message: message.text == "📈 Umumiy statistika")
+
+@dp.message_handler(lambda message: message.text == "📈 Umumiy statistika")
 async def export_all_users_stats(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
@@ -246,8 +271,11 @@ async def export_all_users_stats(message: types.Message):
             request_counts = dict(cursor.fetchall())
         
         data = {
-            "Foydalanuvchi ID": [], "Ism": [], "Username": [],
-            "Ro‘yxatdan o‘tgan": [], "So‘rovlar soni": []
+            "Foydalanuvchi ID": [],
+            "Ism": [],
+            "Username": [],
+            "Ro‘yxatdan o‘tgan": [],
+            "So‘rovlar soni": []
         }
         for user in users:
             user_id, first_name, last_name, username, created_at = user
@@ -262,20 +290,21 @@ async def export_all_users_stats(message: types.Message):
         df.to_excel(file_name, index=False)
         
         with open(file_name, "rb") as file:
-            await message.answer_document(types.InputFile(file), caption="📈 Barcha foydalanuvchilar statistikasi")
+            await message.answer_document(file, caption="📈 Barcha foydalanuvchilar statistikasi")
         os.remove(file_name)
     except Exception as e:
         logger.error(f"Umumiy statistika eksportida xatolik: {e}")
         await message.answer("❌ Statistika eksport qilishda xatolik yuz berdi!")
 
-@dp.message(lambda message: message.text == "📊 Statistika")
+# Admin funksiyalari
+@dp.message_handler(lambda message: message.text == "📊 Statistika")
 async def show_stats(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     user_count = get_user_count()
     await message.answer(f"📊 Botdagi umumiy foydalanuvchilar soni: {user_count} ta")
 
-@dp.message(lambda message: message.text == "📥 Excelni yuklash")
+@dp.message_handler(lambda message: message.text == "📥 Excelni yuklash")
 async def download_excel(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
@@ -283,11 +312,10 @@ async def download_excel(message: types.Message):
     df = pd.DataFrame(users, columns=["ID", "Telegram ID", "Ism", "Familiya", "Username", "Ro‘yxatdan o‘tgan vaqt"])
     df.to_excel("users.xlsx", index=False)
     with open("users.xlsx", "rb") as file:
-        await message.answer_document(types.InputFile(file), caption="📥 Foydalanuvchilar ro‘yxati (Excel)")
-    os.remove("users.xlsx")
+        await message.answer_document(file, caption="📥 Foydalanuvchilar ro‘yxati (Excel)")
 
-@dp.message(lambda message: message.text == "📤 Fayl yuklash")
-async def request_file_code(message: types.Message, state: FSMContext):
+@dp.message_handler(lambda message: message.text == "📤 Fayl yuklash")
+async def request_file_code(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("📥 Fayl kodini kiriting (faqat raqam) yoki bekor qilish uchun /cancel bosing:")
@@ -314,16 +342,16 @@ def parse_date_input(user_input):
             datetime.strptime(user_input, "%Y-%m-%d %H:%M:%S")
             return user_input, user_input
         except ValueError:
-            return None, None
+            return None, None  # Noto‘g‘ri format
 
-@dp.message(lambda message: message.text == "👤 Foydalanuvchi statistikasi")
-async def request_user_stats(message: types.Message, state: FSMContext):
+@dp.message_handler(lambda message: message.text == "👤 Foydalanuvchi statistikasi")
+async def request_user_stats(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("👤 Statistikasini ko‘rish uchun foydalanuvchi ID’sini kiriting yoki /cancel bosing:")
     await UserStatsStates.waiting_for_user_id.set()
 
-@dp.message(state=UserStatsStates.waiting_for_user_id)
+@dp.message_handler(state=UserStatsStates.waiting_for_user_id)
 async def process_user_stats(message: types.Message, state: FSMContext):
     user_id = message.text.strip()
     if not user_id.isdigit():
@@ -345,14 +373,15 @@ async def process_user_stats(message: types.Message, state: FSMContext):
         "📅 So‘rovlar uchun boshlanish vaqtini kiriting (YYYY-MM-DD HH:MM:SS formatida, masalan, 2025-03-10 00:00:00) yoki 'barchasi' deb yozing\n yoki /cancel bosing:"
     )
     await UserStatsStates.waiting_for_filter_start.set()
+    
 
-@dp.message(state=UserStatsStates.waiting_for_filter_start)
+@dp.message_handler(state=UserStatsStates.waiting_for_filter_start)
 async def process_filter_start(message: types.Message, state: FSMContext):
     start_input = message.text.strip()
     data = await state.get_data()
     user_id = data["user_id"]
     
-    start_date, _ = parse_date_input(start_input)
+    start_date, _ = parse_date_input(start_input)  # Faqat start_date ishlatiladi
     if start_date is None and start_input.lower() != "barchasi":
         await message.answer("❌ Noto‘g‘ri format! 'bugun', 'kecha', 'hafta', 'barchasi' yoki YYYY-MM-DD HH:MM:SS kiriting\n yoki /cancel bosing:")
         return
@@ -363,14 +392,14 @@ async def process_filter_start(message: types.Message, state: FSMContext):
     )
     await UserStatsStates.waiting_for_filter_end.set()
 
-@dp.message(state=UserStatsStates.waiting_for_filter_end)
+@dp.message_handler(state=UserStatsStates.waiting_for_filter_end)
 async def process_filter_end(message: types.Message, state: FSMContext):
     end_input = message.text.strip()
     data = await state.get_data()
     user_id = data["user_id"]
     start_date = data["start_date"]
     
-    _, end_date = parse_date_input(end_input)
+    _, end_date = parse_date_input(end_input)  # Faqat end_date ishlatiladi
     if end_date is None and end_input.lower() != "barchasi":
         await message.answer("❌ Noto‘g‘ri format! 'bugun', 'kecha', 'hafta', 'barchasi' yoki YYYY-MM-DD HH:MM:SS kiriting\n yoki /cancel bosing:")
         return
@@ -405,7 +434,8 @@ async def process_filter_end(message: types.Message, state: FSMContext):
     await message.answer(response, reply_markup=export_keyboard)
     await state.finish()
 
-@dp.callback_query(lambda c: c.data.startswith("export_stats_"))
+# Excel eksport handler (filtrlarni hisobga olgan holda)
+@dp.callback_query_handler(lambda c: c.data.startswith("export_stats_"))
 async def export_user_stats(callback: types.CallbackQuery):
     parts = callback.data.split("_")
     user_id = int(parts[2])
@@ -437,34 +467,54 @@ async def export_user_stats(callback: types.CallbackQuery):
     df.to_excel(file_name, index=False)
     
     with open(file_name, "rb") as file:
-        await callback.message.answer_document(types.InputFile(file), caption=f"📊 Foydalanuvchi {user_id} statistikasi (Filtr: {start_date or 'barchasi'} - {end_date or 'barchasi'})")
+        await callback.message.answer_document(file, caption=f"📊 Foydalanuvchi {user_id} statistikasi (Filtr: {start_date or 'barchasi'} - {end_date or 'barchasi'})")
     os.remove(file_name)
     await callback.answer()
 
 FILE_TYPES = ["document", "photo", "video", "audio", "animation", "voice", "sticker"]
+
 ITEMS_PER_PAGE = 10
 
-@dp.message(lambda message: message.text == "📋 Fayl kodlari ro‘yxati")
+# Fayl kodlari ro‘yxatini ko‘rsatish
+@dp.message_handler(lambda message: message.text == "📋 Fayl kodlari ro‘yxati")
 async def list_file_codes(message: types.Message):
     if message.from_user.id not in ADMINS:
-        await message.answer("<b>🚫 Xatolik!</b>\n<i>Siz admin emassiz. Bu funksiya faqat adminlar uchun!</i>")
+        await message.answer(
+            "<b>🚫 Xatolik!</b>\n"
+            "<i>Siz admin emassiz. Bu funksiya faqat adminlar uchun!</i>",
+            parse_mode="HTML"
+        )
         return
     
+    # Fayl turlari va ularga mos emojilar
     file_type_emojis = {
-        "all": "📦", "document": "📄", "photo": "🖼️", "video": "🎥",
-        "audio": "🎵", "animation": "🎞️", "voice": "🎤", "sticker": "💟"
+        "all": "📦",
+        "document": "📄",
+        "photo": "🖼️",
+        "video": "🎥",
+        "audio": "🎵",
+        "animation": "🎞️",
+        "voice": "🎤",
+        "sticker": "💟"
     }
+
     filter_keyboard = InlineKeyboardMarkup(row_width=2)
     filter_keyboard.add(
         InlineKeyboardButton(f"{file_type_emojis['all']} Barchasi", callback_data="filter_all"),
-        *[InlineKeyboardButton(f"{file_type_emojis[ftype]} {ftype.capitalize()}", callback_data=f"filter_{ftype}") for ftype in FILE_TYPES]
+        *[
+            InlineKeyboardButton(f"{file_type_emojis[ftype]} {ftype.capitalize()}", callback_data=f"filter_{ftype}")
+            for ftype in FILE_TYPES
+        ]
     )
     await message.answer(
-        "<b>📋 Fayl Kodlari Ro‘yxati</b>\n<i>Fayllarni ko‘rish uchun quyidagi filtrlarlardan birini tanlang:</i>\n👇 Turini tanlang!",
+        "<b>📋 Fayl Kodlari Ro‘yxati</b>\n"
+        "<i>Fayllarni ko‘rish uchun quyidagi filtrlarlardan birini tanlang:</i>\n"
+        "👇 Turini tanlang!",
+        parse_mode="HTML",
         reply_markup=filter_keyboard
     )
 
-@dp.callback_query(lambda c: c.data.startswith("filter_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("filter_"))
 async def process_file_filter(callback: types.CallbackQuery, state: FSMContext):
     filter_type = callback.data.split("_")[1]
     file_type = None if filter_type == "all" else filter_type
@@ -473,17 +523,30 @@ async def process_file_filter(callback: types.CallbackQuery, state: FSMContext):
     if not file_codes:
         await callback.message.delete()
         await callback.message.answer(
-            "<b>🚫 Hech narsa topilmadi!</b>\n<i>Tanlangan turda hali fayl kodlari mavjud emas.</i>\n📤 Yangi fayl qo‘shish uchun <b>“Fayl yuklash”</b>ni sinab ko‘ring!",
+            "<b>🚫 Hech narsa topilmadi!</b>\n"
+            "<i>Tanlangan turda hali fayl kodlari mavjud emas.</i>\n"
+            "📤 Yangi fayl qo‘shish uchun <b>“Fayl yuklash”</b>ni sinab ko‘ring!",
+            parse_mode="HTML",
             reply_markup=admin_keyboard
         )
         await callback.answer()
         return
     
+    # Birinchi sahifani ko‘rsatish
     await state.update_data(file_codes=file_codes, file_type=file_type, current_page=0)
     await show_file_page(callback.message, state, 0)
+    
+    await FileListStates.listing_files.set()
+    await callback.answer()
+    
+    # Birinchi sahifani ko‘rsatish
+    await state.update_data(file_codes=file_codes, file_type=file_type, current_page=0)
+    await show_file_page(callback.message, state, 0)
+    
     await FileListStates.listing_files.set()
     await callback.answer()
 
+# Sahifani ko‘rsatish funksiyasi
 async def show_file_page(message: types.Message, state: FSMContext, page: int):
     data = await state.get_data()
     file_codes = data["file_codes"]
@@ -510,8 +573,10 @@ async def show_file_page(message: types.Message, state: FSMContext, page: int):
             f"<b>Yuklangan:</b> {uploaded_at}{caption_text}\n"
         )
     
+    # Sahifa ma'lumoti
     response += f"\nSahifa: {page + 1}/{total_pages}"
     
+    # Navigatsiya tugmalari
     nav_keyboard = InlineKeyboardMarkup()
     if page > 0:
         nav_keyboard.add(InlineKeyboardButton("⏪ Oldingi", callback_data=f"page_{page-1}"))
@@ -519,29 +584,33 @@ async def show_file_page(message: types.Message, state: FSMContext, page: int):
         nav_keyboard.insert(InlineKeyboardButton("Keyingi ⏩", callback_data=f"page_{page+1}"))
     nav_keyboard.add(InlineKeyboardButton("🔙 Orqaga", callback_data="back_to_menu"))
     
-    await message.edit_text(response, reply_markup=nav_keyboard)
+    await message.edit_text(response, parse_mode="HTML", reply_markup=nav_keyboard)
 
-@dp.callback_query(lambda c: c.data.startswith("page_"), state=FileListStates.listing_files)
+# Navigatsiya handler
+@dp.callback_query_handler(lambda c: c.data.startswith("page_"), state=FileListStates.listing_files)
 async def process_page_navigation(callback: types.CallbackQuery, state: FSMContext):
     page = int(callback.data.split("_")[1])
     await show_file_page(callback.message, state, page)
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "back_to_menu", state=FileListStates.listing_files)
+# Orqaga qaytish
+@dp.callback_query_handler(lambda c: c.data == "back_to_menu", state=FileListStates.listing_files)
 async def back_to_admin_menu_from_list(callback: types.CallbackQuery, state: FSMContext):
     await state.finish()
     await callback.message.answer("👨‍💻 Admin panelga xush kelibsiz!", reply_markup=admin_keyboard)
     await callback.message.delete()
     await callback.answer()
 
-@dp.message(lambda message: message.text == "🗑 Fayl o‘chirish")
-async def request_file_delete_code(message: types.Message, state: FSMContext):
+
+
+@dp.message_handler(lambda message: message.text == "🗑 Fayl o‘chirish")
+async def request_file_delete_code(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("🗑 O‘chirish uchun fayl kodini kiriting yoki bekor qilish uchun /cancel bosing:")
     await FileDeleteStates.waiting_for_code.set()
 
-@dp.message(state=FileDeleteStates.waiting_for_code)
+@dp.message_handler(state=FileDeleteStates.waiting_for_code)
 async def process_file_delete(message: types.Message, state: FSMContext):
     file_code = message.text.strip()
     if not file_code.isdigit():
@@ -555,7 +624,8 @@ async def process_file_delete(message: types.Message, state: FSMContext):
         await message.answer(f"❌ '{file_code}' kodli fayl topilmadi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(state=FileUploadStates.waiting_for_code)
+
+@dp.message_handler(state=FileUploadStates.waiting_for_code)
 async def receive_file_code(message: types.Message, state: FSMContext):
     if not message.text.isdigit():
         await message.answer("❌ Noto‘g‘ri format! Iltimos, faqat raqam kiriting.")
@@ -570,7 +640,10 @@ async def receive_file_code(message: types.Message, state: FSMContext):
     await message.answer("📤 Endi faylni yuboring yoki bekor qilish uchun /cancel bosing:")
     await FileUploadStates.waiting_for_file.set()
 
-@dp.message(content_types=['document', 'photo', 'video', 'audio', 'animation', 'voice', 'sticker'], state=FileUploadStates.waiting_for_file)
+@dp.message_handler(content_types=[
+    types.ContentType.DOCUMENT, types.ContentType.PHOTO, types.ContentType.VIDEO,
+    types.ContentType.AUDIO, types.ContentType.ANIMATION, types.ContentType.VOICE,
+    types.ContentType.STICKER], state=FileUploadStates.waiting_for_file)
 async def receive_file(message: types.Message, state: FSMContext):
     data = await state.get_data()
     file_code = data.get("file_code")
@@ -604,14 +677,14 @@ async def receive_file(message: types.Message, state: FSMContext):
     
     await state.finish()
 
-@dp.message(state=FileUploadStates.waiting_for_file)
+@dp.message_handler(state=FileUploadStates.waiting_for_file)
 async def handle_wrong_input_file(message: types.Message):
     await message.answer("❌ Noto'g'ri format! Iltimos, faylni yuboring yoki /cancel bosing:")
 
 # Reklama funksiyalari
 async def send_to_all(users, method, *args, content_type="unknown", **kwargs):
     semaphore = asyncio.Semaphore(20)
-    batch_size = 1000
+    batch_size = 1000  # Har bir partiyada 1000 foydalanuvchi
 
     async def send_message_with_semaphore(user):
         async with semaphore:
@@ -628,29 +701,30 @@ async def send_to_all(users, method, *args, content_type="unknown", **kwargs):
         batch = users[i:i + batch_size]
         tasks = [send_message_with_semaphore(user) for user in batch]
         await asyncio.gather(*tasks)
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # Har bir partiyadan keyin 1 soniya pauza
 
-@dp.message(lambda message: message.text == "📢 Reklama")
+@dp.message_handler(lambda message: message.text == "📢 Reklama")
 async def reklama_menu(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Reklama turini tanlang:", reply_markup=reklama_keyboard)
 
-@dp.message(lambda message: message.text == "🔙 Orqaga", state='*')
+@dp.message_handler(lambda message: message.text == "🔙 Orqaga", state="*")
 async def back_to_admin_menu(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
         return
     await state.finish()
     await message.answer("Admin panelga qaytdingiz.", reply_markup=admin_keyboard)
 
-@dp.message(lambda message: message.text == "📝 SMS")
-async def request_sms_reklama(message: types.Message, state: FSMContext):
+# SMS reklama
+@dp.message_handler(lambda message: message.text == "📝 SMS")
+async def request_sms_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Reklama matnini kiriting yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_sms.set()
 
-@dp.message(content_types=['text'], state=ReklamaStates.waiting_for_sms)
+@dp.message_handler(content_types=types.ContentType.TEXT, state=ReklamaStates.waiting_for_sms)
 async def send_sms_reklama(message: types.Message, state: FSMContext):
     reklama_text = message.text
     users = get_all_users()
@@ -658,18 +732,19 @@ async def send_sms_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ SMS reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_sms)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_sms)
 async def handle_wrong_input_sms(message: types.Message):
     await message.answer("❌ Faqat matn yuboring!")
 
-@dp.message(lambda message: message.text == "🖼 Rasm")
-async def request_photo_reklama(message: types.Message, state: FSMContext):
+# Rasm reklama
+@dp.message_handler(lambda message: message.text == "🖼 Rasm")
+async def request_photo_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Rasmni yuboring (jpg/png) yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_photo.set()
 
-@dp.message(content_types=['photo', 'document'], state=ReklamaStates.waiting_for_photo)
+@dp.message_handler(content_types=[types.ContentType.PHOTO, types.ContentType.DOCUMENT], state=ReklamaStates.waiting_for_photo)
 async def send_photo_reklama(message: types.Message, state: FSMContext):
     users = get_all_users()
     caption = message.caption if message.caption else ""
@@ -688,8 +763,9 @@ async def send_photo_reklama(message: types.Message, state: FSMContext):
             temp_file_name = f"temp_{message.document.file_id}.{file_name.split('.')[-1]}"
             async with aiofiles.open(temp_file_name, 'wb') as f:
                 await f.write(file_bytes)
+            # Faylni ochib, yuborishdan oldin yopilmasligini ta'minlash
             with open(temp_file_name, 'rb') as photo:
-                await send_to_all(users, bot.send_photo, types.InputFile(photo), content_type="photo_document", caption=caption)
+                await send_to_all(users, bot.send_photo, photo, content_type="photo_document", caption=caption)
             os.remove(temp_file_name)
             await message.answer("✅ Rasm reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
         else:
@@ -697,18 +773,19 @@ async def send_photo_reklama(message: types.Message, state: FSMContext):
             return
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_photo)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_photo)
 async def handle_wrong_input_photo(message: types.Message):
     await message.answer("❌ Faqat rasm (jpg/png) yuboring!")
 
-@dp.message(lambda message: message.text == "🎥 Video")
-async def request_video_reklama(message: types.Message, state: FSMContext):
+# Video reklama
+@dp.message_handler(lambda message: message.text == "🎥 Video")
+async def request_video_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Videoni yuboring yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_video.set()
 
-@dp.message(content_types=['video'], state=ReklamaStates.waiting_for_video)
+@dp.message_handler(content_types=types.ContentType.VIDEO, state=ReklamaStates.waiting_for_video)
 async def send_video_reklama(message: types.Message, state: FSMContext):
     video_id = message.video.file_id
     caption = message.caption if message.caption else ""
@@ -717,18 +794,19 @@ async def send_video_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ Video reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_video)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_video)
 async def handle_wrong_input_video(message: types.Message):
     await message.answer("❌ Faqat video yuboring!")
 
-@dp.message(lambda message: message.text == "📁 Fayl")
-async def request_file_reklama(message: types.Message, state: FSMContext):
+# Fayl reklama
+@dp.message_handler(lambda message: message.text == "📁 Fayl")
+async def request_file_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Faylni yuboring yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_file.set()
 
-@dp.message(content_types=['document'], state=ReklamaStates.waiting_for_file)
+@dp.message_handler(content_types=types.ContentType.DOCUMENT, state=ReklamaStates.waiting_for_file)
 async def send_file_reklama(message: types.Message, state: FSMContext):
     document_id = message.document.file_id
     caption = message.caption if message.caption else ""
@@ -737,18 +815,19 @@ async def send_file_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ Fayl reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_file)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_file)
 async def handle_wrong_input_file(message: types.Message):
     await message.answer("❌ Faqat fayl (dokument) yuboring!")
 
-@dp.message(lambda message: message.text == "🎞 GIF")
-async def request_gif_reklama(message: types.Message, state: FSMContext):
+# GIF reklama
+@dp.message_handler(lambda message: message.text == "🎞 GIF")
+async def request_gif_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("GIFni yuboring yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_gif.set()
 
-@dp.message(content_types=['animation'], state=ReklamaStates.waiting_for_gif)
+@dp.message_handler(content_types=types.ContentType.ANIMATION, state=ReklamaStates.waiting_for_gif)
 async def send_gif_reklama(message: types.Message, state: FSMContext):
     gif_id = message.animation.file_id
     caption = message.caption if message.caption else ""
@@ -757,18 +836,19 @@ async def send_gif_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ GIF reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_gif)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_gif)
 async def handle_wrong_input_gif(message: types.Message):
     await message.answer("❌ Faqat GIF yuboring!")
 
-@dp.message(lambda message: message.text == "🎙 Ovozli xabar")
-async def request_voice_reklama(message: types.Message, state: FSMContext):
+# Ovozli xabar reklama
+@dp.message_handler(lambda message: message.text == "🎙 Ovozli xabar")
+async def request_voice_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Ovozli xabarni yuboring yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_voice.set()
 
-@dp.message(content_types=['voice'], state=ReklamaStates.waiting_for_voice)
+@dp.message_handler(content_types=types.ContentType.VOICE, state=ReklamaStates.waiting_for_voice)
 async def send_voice_reklama(message: types.Message, state: FSMContext):
     voice_id = message.voice.file_id
     users = get_all_users()
@@ -776,18 +856,19 @@ async def send_voice_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ Ovozli xabar reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_voice)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_voice)
 async def handle_wrong_input_voice(message: types.Message):
     await message.answer("❌ Faqat ovozli xabar yuboring!")
 
-@dp.message(lambda message: message.text == "📍 Lokatsiya")
-async def request_location_reklama(message: types.Message, state: FSMContext):
+# Lokatsiya reklama
+@dp.message_handler(lambda message: message.text == "📍 Lokatsiya")
+async def request_location_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Lokatsiyani yuboring yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_location.set()
 
-@dp.message(content_types=['location'], state=ReklamaStates.waiting_for_location)
+@dp.message_handler(content_types=types.ContentType.LOCATION, state=ReklamaStates.waiting_for_location)
 async def send_location_reklama(message: types.Message, state: FSMContext):
     location = message.location
     users = get_all_users()
@@ -795,18 +876,19 @@ async def send_location_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ Lokatsiya reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_location)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_location)
 async def handle_wrong_input_location(message: types.Message):
     await message.answer("❌ Faqat lokatsiya yuboring!")
 
-@dp.message(lambda message: message.text == "🎵 Musiqa")
-async def request_music_reklama(message: types.Message, state: FSMContext):
+# Musiqa reklama
+@dp.message_handler(lambda message: message.text == "🎵 Musiqa")
+async def request_music_reklama(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Musiqani yuboring (mp3/m4a) yoki bekor qilish uchun /cancel bosing:")
     await ReklamaStates.waiting_for_music.set()
 
-@dp.message(content_types=['audio'], state=ReklamaStates.waiting_for_music)
+@dp.message_handler(content_types=types.ContentType.AUDIO, state=ReklamaStates.waiting_for_music)
 async def send_music_reklama(message: types.Message, state: FSMContext):
     audio_id = message.audio.file_id
     caption = message.caption if message.caption else ""
@@ -815,24 +897,25 @@ async def send_music_reklama(message: types.Message, state: FSMContext):
     await message.answer("✅ Musiqa reklama barcha foydalanuvchilarga yuborildi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(content_types=['any'], state=ReklamaStates.waiting_for_music)
+@dp.message_handler(content_types=types.ContentType.ANY, state=ReklamaStates.waiting_for_music)
 async def handle_wrong_input_music(message: types.Message):
     await message.answer("❌ Faqat musiqa (audio) yuboring!")
 
-@dp.message(lambda message: message.text == "🔗 Majburiy obuna")
+# Majburiy obuna
+@dp.message_handler(lambda message: message.text == "🔗 Majburiy obuna")
 async def majburiy_obuna_menu(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Majburiy obuna sozlamalari:", reply_markup=majburiy_obuna_keyboard)
 
-@dp.message(lambda message: message.text == "➕ Kanal qo'shish")
-async def add_channel_handler(message: types.Message, state: FSMContext):
+@dp.message_handler(lambda message: message.text == "➕ Kanal qo'shish")
+async def add_channel_handler(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Kanal username ni @ belgisi bilan kiriting (masalan, @channel_username)\nYoki bekor qilish uchun /cancel bosing:")
     await MajburiyObunaStates.waiting_for_channel_username.set()
 
-@dp.message(state=MajburiyObunaStates.waiting_for_channel_username)
+@dp.message_handler(state=MajburiyObunaStates.waiting_for_channel_username)
 async def process_add_channel(message: types.Message, state: FSMContext):
     channel_username = message.text.strip()
     if not channel_username.startswith("@"):
@@ -846,14 +929,14 @@ async def process_add_channel(message: types.Message, state: FSMContext):
         await message.answer(f"❌ {channel_username} kanali allaqachon mavjud!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(lambda message: message.text == "➖ Kanalni olib tashlash")
-async def remove_channel_handler(message: types.Message, state: FSMContext):
+@dp.message_handler(lambda message: message.text == "➖ Kanalni olib tashlash")
+async def remove_channel_handler(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("Olib tashlash uchun kanal username ni kiriting (masalan, @channel_username)\nYoki bekor qilish uchun /cancel bosing:")
     await MajburiyObunaStates.waiting_for_channel_remove.set()
 
-@dp.message(state=MajburiyObunaStates.waiting_for_channel_remove)
+@dp.message_handler(state=MajburiyObunaStates.waiting_for_channel_remove)
 async def process_remove_channel(message: types.Message, state: FSMContext):
     channel_username = message.text.strip().lstrip('@')
     success = remove_channel(channel_username)
@@ -863,7 +946,7 @@ async def process_remove_channel(message: types.Message, state: FSMContext):
         await message.answer(f"❌ @{channel_username} kanali topilmadi!", reply_markup=admin_keyboard)
     await state.finish()
 
-@dp.message(lambda message: message.text == "📋 Kanallar ro'yxati")
+@dp.message_handler(lambda message: message.text == "📋 Kanallar ro'yxati")
 async def list_channels_handler(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
@@ -874,7 +957,8 @@ async def list_channels_handler(message: types.Message):
         response = "❌ Hech qanday kanal qo'shilmagan"
     await message.answer(response, reply_markup=admin_keyboard)
 
-@dp.message()
+# Noto‘g‘ri kiritishlar uchun umumiy handler
+@dp.message_handler()
 async def handle_unknown_input(message: types.Message):
     if not await check_subscription(message.from_user.id):
         await prompt_subscription(message)
@@ -883,7 +967,6 @@ async def handle_unknown_input(message: types.Message):
 
 if __name__ == "__main__":
     try:
-        logger.info("Bot ishga tushmoqda...")
-        dp.run_polling(allowed_updates=["message", "callback_query"])
+        executor.start_polling(dp, skip_updates=True)
     except Exception as e:
         logger.error(f"Bot ishga tushishda xatolik: {e}")
